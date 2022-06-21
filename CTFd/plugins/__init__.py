@@ -4,7 +4,7 @@ import os
 from collections import namedtuple
 
 from flask import current_app as app
-from flask import send_file, send_from_directory
+from flask import send_file, send_from_directory, url_for
 
 from CTFd.utils.config.pages import get_pages
 from CTFd.utils.decorators import admins_only as admins_only_wrapper
@@ -145,7 +145,14 @@ def get_user_page_menu_bar():
 
     :return: Returns a list of Menu namedtuples. They have name, and route attributes.
     """
-    return get_pages() + app.plugin_menu_bar
+    pages = []
+    for p in get_pages() + app.plugin_menu_bar:
+        if p.route.startswith("http"):
+            route = p.route
+        else:
+            route = url_for("views.static_html", route=p.route)
+        pages.append(Menu(title=p.title, route=route))
+    return pages
 
 
 def bypass_csrf_protection(f):
@@ -159,6 +166,17 @@ def bypass_csrf_protection(f):
     """
     f._bypass_csrf = True
     return f
+
+
+def get_plugin_names():
+    modules = sorted(glob.glob(app.plugins_dir + "/*"))
+    blacklist = {"__pycache__"}
+    plugins = []
+    for module in modules:
+        module_name = os.path.basename(module)
+        if os.path.isdir(module) and module_name not in blacklist:
+            plugins.append(module_name)
+    return plugins
 
 
 def init_plugins(app):
@@ -176,17 +194,14 @@ def init_plugins(app):
 
     app.admin_plugin_menu_bar = []
     app.plugin_menu_bar = []
+    app.plugins_dir = os.path.dirname(__file__)
 
     if app.config.get("SAFE_MODE", False) is False:
-        modules = sorted(glob.glob(os.path.dirname(__file__) + "/*"))
-        blacklist = {"__pycache__"}
-        for module in modules:
-            module_name = os.path.basename(module)
-            if os.path.isdir(module) and module_name not in blacklist:
-                module = "." + module_name
-                module = importlib.import_module(module, package="CTFd.plugins")
-                module.load(app)
-                print(" * Loaded module, %s" % module)
+        for plugin in get_plugin_names():
+            module = "." + plugin
+            module = importlib.import_module(module, package="CTFd.plugins")
+            module.load(app)
+            print(" * Loaded module, %s" % module)
 
     app.jinja_env.globals.update(get_admin_plugin_menu_bar=get_admin_plugin_menu_bar)
     app.jinja_env.globals.update(get_user_page_menu_bar=get_user_page_menu_bar)

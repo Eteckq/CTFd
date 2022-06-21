@@ -1,6 +1,5 @@
 from uuid import uuid4
 
-import six
 from flask.json.tag import TaggedJSONSerializer
 from flask.sessions import SessionInterface, SessionMixin
 from itsdangerous import BadSignature, want_bytes
@@ -52,7 +51,12 @@ class CachingSessionInterface(SessionInterface):
     session_class = CachedSession
 
     def _generate_sid(self):
-        return str(uuid4())
+        sid = str(uuid4())
+        v = cache.get(key=self.key_prefix + sid)
+        while v:
+            sid = str(uuid4())
+            v = cache.get(key=self.key_prefix + sid)
+        return sid
 
     def __init__(self, key_prefix, use_signer=True, permanent=False):
         self.key_prefix = key_prefix
@@ -73,7 +77,7 @@ class CachingSessionInterface(SessionInterface):
                 sid = self._generate_sid()
                 return self.session_class(sid=sid, permanent=self.permanent)
 
-        if not six.PY2 and not isinstance(sid, text_type):
+        if isinstance(sid, text_type) is False:
             sid = sid.decode("utf-8", "strict")
         val = cache.get(self.key_prefix + sid)
         if val is not None:

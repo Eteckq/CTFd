@@ -4,11 +4,12 @@ import random
 import string
 import uuid
 from collections import namedtuple
+from contextlib import contextmanager
+from unittest.mock import Mock, patch
 
 import requests
-import six
 from flask.testing import FlaskClient
-from mock import Mock, patch
+from freezegun import freeze_time
 from sqlalchemy.engine.url import make_url
 from sqlalchemy_utils import drop_database
 from werkzeug.datastructures import Headers
@@ -18,30 +19,36 @@ from CTFd.cache import cache, clear_standings
 from CTFd.config import TestingConfig
 from CTFd.models import (
     Awards,
+    ChallengeComments,
     ChallengeFiles,
     Challenges,
+    ChallengeTopics,
+    Comments,
     Fails,
+    Fields,
     Files,
     Flags,
     Hints,
     Notifications,
+    PageComments,
     PageFiles,
     Pages,
     Solves,
     Tags,
+    TeamComments,
     Teams,
     Tokens,
+    Topics,
     Tracking,
     Unlocks,
+    UserComments,
     Users,
 )
+from CTFd.utils import set_config
+from tests.constants.time import FreezeTimes
 
-if six.PY2:
-    text_type = unicode  # noqa: F821
-    binary_type = str
-else:
-    text_type = str
-    binary_type = bytes
+text_type = str
+binary_type = bytes
 
 
 FakeRequest = namedtuple("FakeRequest", ["form"])
@@ -60,11 +67,62 @@ class CTFdTestClient(FlaskClient):
         return super(CTFdTestClient, self).open(*args, **kwargs)
 
 
+class ctftime:
+    @contextmanager
+    def init():
+        """
+        This context manager can be used to setup start and end dates for a test CTFd
+        """
+        try:
+            set_config("start", FreezeTimes.START)
+            set_config("end", FreezeTimes.END)
+            yield
+        finally:
+            set_config("start", None)
+            set_config("end", None)
+
+    @contextmanager
+    def not_started():
+        """
+        This context manager sets the current time to before the start date of the test CTFd
+        """
+        try:
+            freezer = freeze_time(FreezeTimes.NOT_STARTED)
+            frozen_time = freezer.start()
+            yield frozen_time
+        finally:
+            freezer.stop()
+
+    @contextmanager
+    def started():
+        """
+        This context manager sets the current time to the start date of the test CTFd
+        """
+        try:
+            freezer = freeze_time(FreezeTimes.STARTED)
+            frozen_time = freezer.start()
+            yield frozen_time
+        finally:
+            freezer.stop()
+
+    @contextmanager
+    def ended():
+        """
+        This context manager sets the current time to after the end date of the test CTFd
+        """
+        try:
+            freezer = freeze_time(FreezeTimes.ENDED)
+            frozen_time = freezer.start()
+            yield frozen_time
+        finally:
+            freezer.stop()
+
+
 def create_ctfd(
     ctf_name="CTFd",
     ctf_description="CTF description",
     name="admin",
-    email="admin@ctfd.io",
+    email="admin@examplectf.com",
     password="password",
     user_mode="users",
     setup=True,
@@ -104,7 +162,7 @@ def setup_ctfd(
     ctf_name="CTFd",
     ctf_description="CTF description",
     name="admin",
-    email="admin@ctfd.io",
+    email="admin@examplectf.com",
     password="password",
     user_mode="users",
 ):
@@ -133,7 +191,11 @@ def destroy_ctfd(app):
 
 
 def register_user(
-    app, name="user", email="user@ctfd.io", password="password", raise_for_error=True
+    app,
+    name="user",
+    email="user@examplectf.com",
+    password="password",
+    raise_for_error=True,
 ):
     with app.app_context():
         with app.test_client() as client:
@@ -149,10 +211,8 @@ def register_user(
             if raise_for_error:
                 with client.session_transaction() as sess:
                     assert sess["id"]
-                    assert sess["name"] == name
-                    assert sess["type"]
-                    assert sess["email"]
                     assert sess["nonce"]
+                    assert sess["hash"]
 
 
 def register_team(app, name="team", password="password", raise_for_error=True):
@@ -177,10 +237,8 @@ def login_as_user(app, name="user", password="password", raise_for_error=True):
             if raise_for_error:
                 with client.session_transaction() as sess:
                     assert sess["id"]
-                    assert sess["name"]
-                    assert sess["type"]
-                    assert sess["email"]
                     assert sess["nonce"]
+                    assert sess["hash"]
             return client
 
 
@@ -188,7 +246,7 @@ def login_with_mlc(
     app,
     name="user",
     scope="profile%20team",
-    email="user@ctfd.io",
+    email="user@examplectf.com",
     oauth_id=1337,
     team_name="TestTeam",
     team_oauth_id=1234,
@@ -236,10 +294,8 @@ def login_with_mlc(
         if raise_for_error:
             with client.session_transaction() as sess:
                 assert sess["id"]
-                assert sess["name"]
-                assert sess["type"]
-                assert sess["email"]
                 assert sess["nonce"]
+                assert sess["hash"]
         return client
 
 
@@ -299,6 +355,17 @@ def gen_tag(db, challenge_id, value="tag_tag", **kwargs):
     return tag
 
 
+def gen_topic(db, challenge_id, value="topic", **kwargs):
+    topic = Topics(value=value, **kwargs)
+    db.session.add(topic)
+    db.session.commit()
+
+    challenge_topic = ChallengeTopics(challenge_id=challenge_id, topic_id=topic.id)
+    db.session.add(challenge_topic)
+    db.session.commit()
+    return challenge_topic
+
+
 def gen_file(db, location, challenge_id=None, page_id=None):
     if challenge_id:
         f = ChallengeFiles(challenge_id=challenge_id, location=location)
@@ -320,7 +387,9 @@ def gen_flag(db, challenge_id, content="flag", type="static", data=None, **kwarg
     return flag
 
 
-def gen_user(db, name="user_name", email="user@ctfd.io", password="password", **kwargs):
+def gen_user(
+    db, name="user_name", email="user@examplectf.com", password="password", **kwargs
+):
     user = Users(name=name, email=email, password=password, **kwargs)
     db.session.add(user)
     db.session.commit()
@@ -330,7 +399,7 @@ def gen_user(db, name="user_name", email="user@ctfd.io", password="password", **
 def gen_team(
     db,
     name="team_name",
-    email="team@ctfd.io",
+    email="team@examplectf.com",
     password="password",
     member_count=4,
     **kwargs
@@ -338,7 +407,7 @@ def gen_team(
     team = Teams(name=name, email=email, password=password, **kwargs)
     for i in range(member_count):
         name = "user-{}-{}".format(random_string(), str(i))
-        user = gen_user(db, name=name, email=name + "@ctfd.io", team_id=team.id)
+        user = gen_user(db, name=name, email=name + "@examplectf.com", team_id=team.id)
         if i == 0:
             team.captain_id = user.id
         team.members.append(user)
@@ -444,6 +513,48 @@ def gen_token(db, type="user", user_id=None, expiration=None):
     db.session.add(token)
     db.session.commit()
     return token
+
+
+def gen_comment(db, content="comment", author_id=None, type="challenge", **kwargs):
+    if type == "challenge":
+        model = ChallengeComments
+    elif type == "user":
+        model = UserComments
+    elif type == "team":
+        model = TeamComments
+    elif type == "page":
+        model = PageComments
+    else:
+        model = Comments
+
+    comment = model(content=content, author_id=author_id, type=type, **kwargs)
+    db.session.add(comment)
+    db.session.commit()
+    return comment
+
+
+def gen_field(
+    db,
+    name="CustomField",
+    type="user",
+    field_type="text",
+    description="CustomFieldDescription",
+    required=True,
+    public=True,
+    editable=True,
+):
+    field = Fields(
+        name=name,
+        type=type,
+        field_type=field_type,
+        description=description,
+        required=required,
+        public=public,
+        editable=editable,
+    )
+    db.session.add(field)
+    db.session.commit()
+    return field
 
 
 def simulate_user_activity(db, user):

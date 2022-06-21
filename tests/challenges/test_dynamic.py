@@ -3,6 +3,7 @@
 
 from CTFd.models import Challenges
 from CTFd.plugins.dynamic_challenges import DynamicChallenge, DynamicValueChallenge
+from CTFd.utils.security.signing import hmac
 from tests.helpers import (
     FakeRequest,
     create_ctfd,
@@ -25,7 +26,7 @@ def test_can_create_dynamic_challenge():
             "name": "name",
             "category": "category",
             "description": "description",
-            "value": 100,
+            "initial": 100,
             "decay": 20,
             "minimum": 1,
             "state": "hidden",
@@ -47,14 +48,13 @@ def test_can_create_dynamic_challenge():
 
 
 def test_can_update_dynamic_challenge():
-    """Test that dynamic challenges can be deleted"""
     app = create_ctfd(enable_plugins=True)
     with app.app_context():
         challenge_data = {
             "name": "name",
             "category": "category",
             "description": "description",
-            "value": 100,
+            "initial": 100,
             "decay": 20,
             "minimum": 1,
             "state": "hidden",
@@ -102,7 +102,7 @@ def test_can_add_requirement_dynamic_challenge():
             "name": "name",
             "category": "category",
             "description": "description",
-            "value": 100,
+            "initial": 100,
             "decay": 20,
             "minimum": 1,
             "state": "hidden",
@@ -150,6 +150,7 @@ def test_can_add_requirement_dynamic_challenge():
 
 
 def test_can_delete_dynamic_challenge():
+    """Test that dynamic challenges can be deleted"""
     app = create_ctfd(enable_plugins=True)
     with app.app_context():
         register_user(app)
@@ -159,7 +160,7 @@ def test_can_delete_dynamic_challenge():
             "name": "name",
             "category": "category",
             "description": "description",
-            "value": 100,
+            "initial": 100,
             "decay": 20,
             "minimum": 1,
             "state": "hidden",
@@ -190,7 +191,7 @@ def test_dynamic_challenge_loses_value_properly():
             "name": "name",
             "category": "category",
             "description": "description",
-            "value": 100,
+            "initial": 100,
             "decay": 20,
             "minimum": 1,
             "state": "visible",
@@ -204,18 +205,17 @@ def test_dynamic_challenge_loses_value_properly():
 
         for i, team_id in enumerate(range(2, 26)):
             name = "user{}".format(team_id)
-            email = "user{}@ctfd.io".format(team_id)
+            email = "user{}@examplectf.com".format(team_id)
             # We need to bypass rate-limiting so gen_user instead of register_user
-            gen_user(app.db, name=name, email=email)
+            user = gen_user(app.db, name=name, email=email)
+            user_id = user.id
 
             with app.test_client() as client:
                 # We need to bypass rate-limiting so creating a fake user instead of logging in
                 with client.session_transaction() as sess:
-                    sess["id"] = team_id
-                    sess["name"] = name
-                    sess["type"] = "user"
-                    sess["email"] = email
+                    sess["id"] = user_id
                     sess["nonce"] = "fake-nonce"
+                    sess["hash"] = hmac(user.password)
 
                 data = {"submission": "flag", "challenge_id": 1}
 
@@ -240,7 +240,7 @@ def test_dynamic_challenge_doesnt_lose_value_on_update():
             "name": "name",
             "category": "category",
             "description": "description",
-            "value": 10000,
+            "initial": 10000,
             "decay": 4,
             "minimum": 10,
             "state": "visible",
@@ -273,7 +273,7 @@ def test_dynamic_challenge_value_isnt_affected_by_hidden_users():
             "name": "name",
             "category": "category",
             "description": "description",
-            "value": 100,
+            "initial": 100,
             "decay": 20,
             "minimum": 1,
             "state": "visible",
@@ -293,29 +293,59 @@ def test_dynamic_challenge_value_isnt_affected_by_hidden_users():
         assert resp["status"] == "correct"
 
         # Make solves as hidden users. Also should not affect value
-        for i, team_id in enumerate(range(2, 26)):
+        for _, team_id in enumerate(range(2, 26)):
             name = "user{}".format(team_id)
-            email = "user{}@ctfd.io".format(team_id)
+            email = "user{}@examplectf.com".format(team_id)
             # We need to bypass rate-limiting so gen_user instead of register_user
             user = gen_user(app.db, name=name, email=email)
             user.hidden = True
             app.db.session.commit()
+            user_id = user.id
 
             with app.test_client() as client:
                 # We need to bypass rate-limiting so creating a fake user instead of logging in
                 with client.session_transaction() as sess:
-                    sess["id"] = team_id
-                    sess["name"] = name
-                    sess["type"] = "user"
-                    sess["email"] = email
+                    sess["id"] = user_id
                     sess["nonce"] = "fake-nonce"
+                    sess["hash"] = hmac(user.password)
 
                 data = {"submission": "flag", "challenge_id": 1}
 
                 r = client.post("/api/v1/challenges/attempt", json=data)
+                assert r.status_code == 200
                 resp = r.get_json()["data"]
                 assert resp["status"] == "correct"
 
                 chal = DynamicChallenge.query.filter_by(id=1).first()
                 assert chal.value == chal.initial
+    destroy_ctfd(app)
+
+
+def test_dynamic_challenges_reset():
+    app = create_ctfd(enable_plugins=True)
+    with app.app_context():
+        client = login_as_user(app, name="admin", password="password")
+
+        challenge_data = {
+            "name": "name",
+            "category": "category",
+            "description": "description",
+            "initial": 100,
+            "decay": 20,
+            "minimum": 1,
+            "state": "hidden",
+            "type": "dynamic",
+        }
+
+        r = client.post("/api/v1/challenges", json=challenge_data)
+        assert Challenges.query.count() == 1
+        assert DynamicChallenge.query.count() == 1
+
+        with client.session_transaction() as sess:
+            data = {"nonce": sess.get("nonce"), "challenges": "on"}
+            r = client.post("/admin/reset", data=data)
+            assert r.location.endswith("/admin/statistics")
+        assert Challenges.query.count() == 0
+        assert DynamicChallenge.query.count() == 0
+
     destroy_ctfd(app)

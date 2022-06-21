@@ -1,7 +1,6 @@
 import "./main";
 import $ from "jquery";
-import Moment from "moment-timezone";
-import moment from "moment-timezone";
+import dayjs from "dayjs";
 import CTFd from "../CTFd";
 
 function switchTab(event) {
@@ -13,7 +12,7 @@ function switchTab(event) {
     .closest("[role=tabpanel]")
     .find("input,textarea")
     .each(function(i, e) {
-      $e = $(e);
+      let $e = $(e);
       let status = e.checkValidity();
       if (status === false) {
         $e.removeClass("input-filled-valid");
@@ -31,20 +30,23 @@ function switchTab(event) {
 }
 
 function processDateTime(datetime) {
-  let date_picker = $(`#${datetime}-date`);
-  let time_picker = $(`#${datetime}-time`);
-  return function(event) {
-    let unix_time = Moment(
+  return function(_event) {
+    let date_picker = $(`#${datetime}-date`);
+    let time_picker = $(`#${datetime}-time`);
+    let unix_time = dayjs(
       `${date_picker.val()} ${time_picker.val()}`,
       "YYYY-MM-DD HH:mm"
-    )
-      .utc()
-      .format("X");
-    $(`#${datetime}-preview`).val(unix_time);
+    ).unix();
+
+    if (isNaN(unix_time)) {
+      $(`#${datetime}-preview`).val("");
+    } else {
+      $(`#${datetime}-preview`).val(unix_time);
+    }
   };
 }
 
-function mlcSetup(event) {
+function mlcSetup(_event) {
   let params = {
     name: $("#ctf_name").val(),
     type: "jeopardy",
@@ -57,7 +59,7 @@ function mlcSetup(event) {
     start: $("#start-preview").val(),
     end: $("#end-preview").val(),
     platform: "CTFd",
-    state: STATE
+    state: window.STATE
   };
 
   const ret = [];
@@ -88,13 +90,49 @@ $(() => {
   $("#start-date,#start-time").change(processDateTime("start"));
   $("#end-date,#end-time").change(processDateTime("end"));
 
-  $("#config-color-picker").on("input", function(e) {
+  $("#config-color-picker").on("input", function(_e) {
     $("#config-color-input").val($(this).val());
   });
 
   $("#config-color-reset").click(function() {
     $("#config-color-input").val("");
     $("#config-color-picker").val("");
+  });
+
+  $("#ctf_logo").on("change", function() {
+    if (this.files[0].size > 128000) {
+      if (
+        !confirm(
+          "This image file is larger than 128KB which may result in increased load times. Are you sure you'd like to use this logo?"
+        )
+      ) {
+        this.value = "";
+      }
+    }
+  });
+
+  $("#ctf_banner").on("change", function() {
+    if (this.files[0].size > 512000) {
+      if (
+        !confirm(
+          "This image file is larger than 512KB which may result in increased load times. Are you sure you'd like to use this icon?"
+        )
+      ) {
+        this.value = "";
+      }
+    }
+  });
+
+  $("#ctf_small_icon").on("change", function() {
+    if (this.files[0].size > 32000) {
+      if (
+        !confirm(
+          "This image file is larger than 32KB which may result in increased load times. Are you sure you'd like to use this icon?"
+        )
+      ) {
+        this.value = "";
+      }
+    }
   });
 
   window.addEventListener("storage", function(event) {
@@ -117,13 +155,11 @@ $(() => {
         .val();
 
       $.ajax({
-        type: "POST",
         url:
-          "https://ctfd.us15.list-manage.com/subscribe/post-json?u=6c7fa6feeced52775aec9d015&id=dd1484208e&c=?",
+          "https://newsletters.ctfd.io/lists/ot889gr1sa0e1/subscribe/post-json?c=?",
         data: {
-          EMAIL: email,
-          subscribe: "Subscribe",
-          b_6c7fa6feeced52775aec9d015_dd1484208e: ""
+          email: email,
+          b_38e27f7d496889133d2214208_d7c3ed71f9: ""
         },
         dataType: "jsonp",
         contentType: "application/json; charset=utf-8"

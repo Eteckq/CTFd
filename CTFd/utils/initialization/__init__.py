@@ -5,11 +5,12 @@ import sys
 
 from flask import abort, redirect, render_template, request, session, url_for
 from sqlalchemy.exc import IntegrityError, InvalidRequestError
-from werkzeug.wsgi import DispatcherMiddleware
+from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
+from CTFd.cache import clear_user_recent_ips
 from CTFd.exceptions import UserNotFoundException, UserTokenExpiredException
 from CTFd.models import Tracking, db
-from CTFd.utils import config, get_config, markdown
+from CTFd.utils import config, get_config, import_in_progress, markdown
 from CTFd.utils.config import (
     can_send_mail,
     ctf_logo,
@@ -19,15 +20,9 @@ from CTFd.utils.config import (
     is_setup,
 )
 from CTFd.utils.config.pages import get_pages
-from CTFd.utils.config.visibility import (
-    accounts_visible,
-    challenges_visible,
-    registration_visible,
-    scores_visible,
-)
-from CTFd.utils.countries import get_countries, lookup_country_code
 from CTFd.utils.dates import isoformat, unix_time, unix_time_millis
 from CTFd.utils.events import EventManager, RedisEventManager
+from CTFd.utils.humanize.words import pluralize
 from CTFd.utils.modes import generate_account_url, get_mode_as_word
 from CTFd.utils.plugins import (
     get_configurable_plugins,
@@ -38,7 +33,14 @@ from CTFd.utils.plugins import (
 )
 from CTFd.utils.security.auth import login_user, logout_user, lookup_user_token
 from CTFd.utils.security.csrf import generate_nonce
-from CTFd.utils.user import authed, get_current_team, get_current_user, get_ip
+from CTFd.utils.user import (
+    authed,
+    get_current_team_attrs,
+    get_current_user_attrs,
+    get_current_user_recent_ips,
+    get_ip,
+    is_admin,
+)
 
 
 def init_template_filters(app):
@@ -46,9 +48,28 @@ def init_template_filters(app):
     app.jinja_env.filters["unix_time"] = unix_time
     app.jinja_env.filters["unix_time_millis"] = unix_time_millis
     app.jinja_env.filters["isoformat"] = isoformat
+    app.jinja_env.filters["pluralize"] = pluralize
 
 
 def init_template_globals(app):
+    from CTFd.constants import JINJA_ENUMS
+    from CTFd.constants.assets import Assets
+    from CTFd.constants.config import Configs
+    from CTFd.constants.plugins import Plugins
+    from CTFd.constants.sessions import Session
+    from CTFd.constants.static import Static
+    from CTFd.constants.users import User
+    from CTFd.constants.teams import Team
+    from CTFd.forms import Forms
+    from CTFd.utils.config.visibility import (
+        accounts_visible,
+        challenges_visible,
+        registration_visible,
+        scores_visible,
+    )
+    from CTFd.utils.countries import get_countries, lookup_country_code
+    from CTFd.utils.countries.geoip import lookup_ip_address, lookup_ip_address_city
+
     app.jinja_env.globals.update(config=config)
     app.jinja_env.globals.update(get_pages=get_pages)
     app.jinja_env.globals.update(can_send_mail=can_send_mail)
@@ -68,6 +89,8 @@ def init_template_globals(app):
     app.jinja_env.globals.update(generate_account_url=generate_account_url)
     app.jinja_env.globals.update(get_countries=get_countries)
     app.jinja_env.globals.update(lookup_country_code=lookup_country_code)
+    app.jinja_env.globals.update(lookup_ip_address=lookup_ip_address)
+    app.jinja_env.globals.update(lookup_ip_address_city=lookup_ip_address_city)
     app.jinja_env.globals.update(accounts_visible=accounts_visible)
     app.jinja_env.globals.update(challenges_visible=challenges_visible)
     app.jinja_env.globals.update(registration_visible=registration_visible)
@@ -75,6 +98,27 @@ def init_template_globals(app):
     app.jinja_env.globals.update(get_mode_as_word=get_mode_as_word)
     app.jinja_env.globals.update(integrations=integrations)
     app.jinja_env.globals.update(authed=authed)
+    app.jinja_env.globals.update(is_admin=is_admin)
+    app.jinja_env.globals.update(get_current_user_attrs=get_current_user_attrs)
+    app.jinja_env.globals.update(get_current_team_attrs=get_current_team_attrs)
+    app.jinja_env.globals.update(get_ip=get_ip)
+    app.jinja_env.globals.update(Assets=Assets)
+    app.jinja_env.globals.update(Configs=Configs)
+    app.jinja_env.globals.update(Plugins=Plugins)
+    app.jinja_env.globals.update(Session=Session)
+    app.jinja_env.globals.update(Static=Static)
+    app.jinja_env.globals.update(Forms=Forms)
+    app.jinja_env.globals.update(User=User)
+    app.jinja_env.globals.update(Team=Team)
+
+    # Add in JinjaEnums
+    # The reason this exists is that on double import, JinjaEnums are not reinitialized
+    # Thus, if you try to create two jinja envs (e.g. during testing), sometimes
+    # an Enum will not be available to Jinja.
+    # Instead we can just directly grab them from the persisted global dictionary.
+    for k, v in JINJA_ENUMS.items():
+        # .update() can't be used here because it would use the literal value k
+        app.jinja_env.globals[k] = v
 
 
 def init_logs(app):
@@ -102,11 +146,13 @@ def init_logs(app):
                 open(log, "a").close()
 
         submission_log = logging.handlers.RotatingFileHandler(
-            logs["submissions"], maxBytes=10000
+            logs["submissions"], maxBytes=10485760, backupCount=5
         )
-        login_log = logging.handlers.RotatingFileHandler(logs["logins"], maxBytes=10000)
+        login_log = logging.handlers.RotatingFileHandler(
+            logs["logins"], maxBytes=10485760, backupCount=5
+        )
         registration_log = logging.handlers.RotatingFileHandler(
-            logs["registrations"], maxBytes=10000
+            logs["registrations"], maxBytes=10485760, backupCount=5
         )
 
         logger_submissions.addHandler(submission_log)
@@ -133,15 +179,10 @@ def init_events(app):
         app.events_manager = EventManager()
     else:
         app.events_manager = EventManager()
+    app.events_manager.listen()
 
 
 def init_request_processors(app):
-    @app.context_processor
-    def inject_user():
-        if session:
-            return dict(session)
-        return dict()
-
     @app.url_defaults
     def inject_theme(endpoint, values):
         if "theme" not in values and app.url_map.is_endpoint_expecting(
@@ -156,6 +197,7 @@ def init_request_processors(app):
                 "views.setup",
                 "views.integrations",
                 "views.themes",
+                "views.files",
             ):
                 return
             else:
@@ -166,44 +208,63 @@ def init_request_processors(app):
         if request.endpoint == "views.themes":
             return
 
-        if authed():
-            track = Tracking.query.filter_by(ip=get_ip(), user_id=session["id"]).first()
-            if not track:
-                visit = Tracking(ip=get_ip(), user_id=session["id"])
-                db.session.add(visit)
+        if import_in_progress():
+            if request.endpoint == "admin.import_ctf":
+                return
             else:
-                track.date = datetime.datetime.utcnow()
+                abort(403, description="Import currently in progress")
 
-            try:
-                db.session.commit()
-            except (InvalidRequestError, IntegrityError):
-                db.session.rollback()
-                logout_user()
+        if authed():
+            user_ips = get_current_user_recent_ips()
+            ip = get_ip()
 
-            if authed():
-                user = get_current_user()
-                team = get_current_team()
+            track = None
+            if (ip not in user_ips) or (request.method != "GET"):
+                track = Tracking.query.filter_by(
+                    ip=get_ip(), user_id=session["id"]
+                ).first()
 
-                if request.path.startswith("/themes") is False:
-                    if user and user.banned:
-                        return (
-                            render_template(
-                                "errors/403.html",
-                                error="You have been banned from this CTF",
-                            ),
-                            403,
-                        )
+                if track:
+                    track.date = datetime.datetime.utcnow()
+                else:
+                    track = Tracking(ip=get_ip(), user_id=session["id"])
+                    db.session.add(track)
 
-                    if team and team.banned:
-                        return (
-                            render_template(
-                                "errors/403.html",
-                                error="Your team has been banned from this CTF",
-                            ),
-                            403,
-                        )
+            if track:
+                try:
+                    db.session.commit()
+                except (InvalidRequestError, IntegrityError):
+                    db.session.rollback()
+                    db.session.close()
+                    logout_user()
+                else:
+                    clear_user_recent_ips(user_id=session["id"])
 
-            db.session.close()
+    @app.before_request
+    def banned():
+        if request.endpoint == "views.themes":
+            return
+
+        if authed():
+            user = get_current_user_attrs()
+            team = get_current_team_attrs()
+
+            if user and user.banned:
+                return (
+                    render_template(
+                        "errors/403.html", error="You have been banned from this CTF"
+                    ),
+                    403,
+                )
+
+            if team and team.banned:
+                return (
+                    render_template(
+                        "errors/403.html",
+                        error="Your team has been banned from this CTF",
+                    ),
+                    403,
+                )
 
     @app.before_request
     def tokens():
@@ -215,7 +276,7 @@ def init_request_processors(app):
             except UserNotFoundException:
                 abort(401)
             except UserTokenExpiredException:
-                abort(401)
+                abort(401, description="Your access token has expired")
             except Exception:
                 abort(401)
             else:

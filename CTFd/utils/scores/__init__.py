@@ -8,7 +8,7 @@ from CTFd.utils.modes import get_model
 
 
 @cache.memoize(timeout=60)
-def get_standings(count=None, admin=False):
+def get_standings(count=None, admin=False, fields=None):
     """
     Get standings as a list of tuples containing account_id, name, and score e.g. [(account_id, team_name, score)].
 
@@ -17,6 +17,8 @@ def get_standings(count=None, admin=False):
 
     Challenges & Awards with a value of zero are filtered out of the calculations to avoid incorrect tie breaks.
     """
+    if fields is None:
+        fields = []
     Model = get_model()
 
     scores = (
@@ -86,6 +88,7 @@ def get_standings(count=None, admin=False):
                 Model.hidden,
                 Model.banned,
                 sumscores.columns.score,
+                *fields,
             )
             .join(sumscores, Model.id == sumscores.columns.account_id)
             .order_by(sumscores.columns.score.desc(), sumscores.columns.id)
@@ -97,6 +100,7 @@ def get_standings(count=None, admin=False):
                 Model.oauth_id.label("oauth_id"),
                 Model.name.label("name"),
                 sumscores.columns.score,
+                *fields,
             )
             .join(sumscores, Model.id == sumscores.columns.account_id)
             .filter(Model.banned == False, Model.hidden == False)
@@ -115,7 +119,9 @@ def get_standings(count=None, admin=False):
 
 
 @cache.memoize(timeout=60)
-def get_team_standings(count=None, admin=False):
+def get_team_standings(count=None, admin=False, fields=None):
+    if fields is None:
+        fields = []
     scores = (
         db.session.query(
             Solves.team_id.label("team_id"),
@@ -159,13 +165,27 @@ def get_team_standings(count=None, admin=False):
 
     if admin:
         standings_query = (
-            db.session.query(Teams.id.label("team_id"))
+            db.session.query(
+                Teams.id.label("team_id"),
+                Teams.oauth_id.label("oauth_id"),
+                Teams.name.label("name"),
+                Teams.hidden,
+                Teams.banned,
+                sumscores.columns.score,
+                *fields,
+            )
             .join(sumscores, Teams.id == sumscores.columns.team_id)
             .order_by(sumscores.columns.score.desc(), sumscores.columns.id)
         )
     else:
         standings_query = (
-            db.session.query(Teams.id.label("team_id"))
+            db.session.query(
+                Teams.id.label("team_id"),
+                Teams.oauth_id.label("oauth_id"),
+                Teams.name.label("name"),
+                sumscores.columns.score,
+                *fields,
+            )
             .join(sumscores, Teams.id == sumscores.columns.team_id)
             .filter(Teams.banned == False)
             .filter(Teams.hidden == False)
@@ -181,7 +201,9 @@ def get_team_standings(count=None, admin=False):
 
 
 @cache.memoize(timeout=60)
-def get_user_standings(count=None, admin=False):
+def get_user_standings(count=None, admin=False, fields=None):
+    if fields is None:
+        fields = []
     scores = (
         db.session.query(
             Solves.user_id.label("user_id"),
@@ -225,13 +247,29 @@ def get_user_standings(count=None, admin=False):
 
     if admin:
         standings_query = (
-            db.session.query(Users.id.label("user_id"))
+            db.session.query(
+                Users.id.label("user_id"),
+                Users.oauth_id.label("oauth_id"),
+                Users.name.label("name"),
+                Users.team_id.label("team_id"),
+                Users.hidden,
+                Users.banned,
+                sumscores.columns.score,
+                *fields,
+            )
             .join(sumscores, Users.id == sumscores.columns.user_id)
             .order_by(sumscores.columns.score.desc(), sumscores.columns.id)
         )
     else:
         standings_query = (
-            db.session.query(Users.id.label("user_id"))
+            db.session.query(
+                Users.id.label("user_id"),
+                Users.oauth_id.label("oauth_id"),
+                Users.name.label("name"),
+                Users.team_id.label("team_id"),
+                sumscores.columns.score,
+                *fields,
+            )
             .join(sumscores, Users.id == sumscores.columns.user_id)
             .filter(Users.banned == False, Users.hidden == False)
             .order_by(sumscores.columns.score.desc(), sumscores.columns.id)

@@ -25,9 +25,24 @@ select.form-control {
 }
 
 #score-graph {
-  height: 450px;
+  min-height: 400px;
   display: block;
   clear: both;
+}
+
+#solves-graph {
+  display: block;
+  height: 350px;
+}
+
+#keys-pie-graph {
+  min-height: 400px;
+  display: block;
+}
+
+#categories-pie-graph {
+  min-height: 400px;
+  display: block;
 }
 
 .form-control {
@@ -42,4 +57,12 @@ select.form-control {
   -webkit-appearance: none;
   /* Behavior changed in Bootstrap v4.1.3. See https://github.com/twbs/bootstrap/issues/27629 */
   height: auto !important;
+}
+
+.challenge-desc {
+  overflow-wrap: anywhere;
+
+  img {
+    max-width: 100%;
+  }
 }
